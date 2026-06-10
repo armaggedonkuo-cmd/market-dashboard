@@ -128,9 +128,9 @@ pc_oi, pc_vol, pc_date = get_taifex_pc()
 # ============ 樣式 ============
 st.markdown("""
 <style>
-.block-container{padding-top:1.2rem;padding-bottom:3rem;max-width:640px;}
+.block-container{padding-top:2.5rem;padding-bottom:3rem;max-width:640px;}
 .sec{font-size:13px;color:#6b7785;font-weight:700;letter-spacing:1px;margin:18px 0 6px;border-left:3px solid #2563eb;padding-left:8px;}
-.card{background:#fff;border:1px solid #e2e6ec;border-radius:14px;padding:12px 14px;margin-bottom:8px;}
+.card{background:#fff;border:1px solid #e2e6ec;border-radius:14px;padding:12px 14px;margin-bottom:8px;color:#1a2029;}
 .up{color:#15883f;font-weight:700;} .dn{color:#d6342b;font-weight:700;} .mut{color:#6b7785;font-size:12px;}
 .big{font-size:26px;font-weight:800;}
 .hrow{display:flex;justify-content:space-between;padding:6px 2px;border-top:1px solid #eef0f3;font-size:14px;}
@@ -139,7 +139,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 now = dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
-st.markdown(f"### 市場觀察  <span class='mut'>{now:%Y/%m/%d %H:%M} 台北</span>", unsafe_allow_html=True)
+st.markdown(
+    f"<div style='font-size:24px;font-weight:800;line-height:1.6;padding-top:4px'>市場觀察 "
+    f"<span class='mut' style='font-weight:400'>{now:%Y/%m/%d %H:%M} 台北</span></div>",
+    unsafe_allow_html=True)
 
 # ============ 大盤 ============
 st.markdown("<div class='sec'>大盤概覽</div>", unsafe_allow_html=True)
