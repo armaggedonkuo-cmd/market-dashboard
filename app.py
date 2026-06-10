@@ -2,7 +2,7 @@
 """
 市場觀察面板 (Streamlit)
 台美股市 + 持股淨值 + 領先/情緒指標 + 經濟日曆
-資料源（皆免費、伺服器端抓取，無 CORS 問題）：
+資料源（皆免費、伺服器端抓取）：
   - 報價/指數/匯率：Yahoo Finance (yfinance)  ~延遲15分
   - 殖利率：FRED (DGS10/DGS2)
   - Fear & Greed：CNN
@@ -15,7 +15,7 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
-st.set_page_config(page_title="市場觀察", page_icon="📈", layout="centered")
+st.set_page_config(page_title="市場觀察", page_icon="chart", layout="centered")
 
 # ============ 你的持股（要改就改這裡）============
 # 台股：(顯示名, Yahoo代號, 張數)   1張=1000股
@@ -44,7 +44,6 @@ INDICES = [
 # ============ 資料抓取 ============
 @st.cache_data(ttl=600, show_spinner=False)
 def get_quotes(symbols):
-    """回傳 {sym: (price, prev_close)}，抓不到則 (None, None)"""
     out = {}
     data = yf.Tickers(" ".join(symbols))
     for s in symbols:
@@ -74,7 +73,6 @@ def get_fx_usdtwd():
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_yield_curve():
-    """FRED DGS10 / DGS2 最新值，回傳 (y10, y2, date)"""
     try:
         url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS10,DGS2"
         df = pd.read_csv(io.StringIO(requests.get(url, timeout=15).text))
@@ -88,7 +86,16 @@ def get_yield_curve():
 def get_fear_greed():
     try:
         url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        headers = {
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                           "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"),
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Origin": "https://edition.cnn.com",
+            "Referer": "https://edition.cnn.com/markets/fear-and-greed",
+        }
+        r = requests.get(url, headers=headers, timeout=15)
+        r.raise_for_status()
         d = r.json()["fear_and_greed"]
         return {
             "score": round(d["score"]), "rating": d["rating"],
@@ -100,7 +107,6 @@ def get_fear_greed():
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_taifex_pc():
-    """台指期 Put/Call：回傳 (未平倉比, 成交量比, 日期)"""
     try:
         url = "https://www.taifex.com.tw/cht/3/pcRatioDown"
         raw = requests.get(url, timeout=15).content.decode("ms950", "ignore")
@@ -133,8 +139,13 @@ st.markdown("""
 .card{background:#fff;border:1px solid #e2e6ec;border-radius:14px;padding:12px 14px;margin-bottom:8px;color:#1a2029;}
 .up{color:#15883f;font-weight:700;} .dn{color:#d6342b;font-weight:700;} .mut{color:#6b7785;font-size:12px;}
 .big{font-size:26px;font-weight:800;}
-.hrow{display:flex;justify-content:space-between;padding:6px 2px;border-top:1px solid #eef0f3;font-size:14px;}
+.hrow{display:flex;justify-content:space-between;align-items:center;padding:7px 2px;border-top:1px solid #eef0f3;font-size:14px;}
 .hrow:first-child{border-top:none;}
+.hrow .r{text-align:right;}
+.hrow .r .px{font-weight:700;}
+.hrow .r .pl{font-size:11px;}
+.flag{font-size:11px;font-weight:700;padding:1px 5px;border-radius:4px;margin-right:5px;}
+.fus{background:#e6effd;color:#2563eb;} .ftw{background:#e3f4ea;color:#15883f;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -156,27 +167,24 @@ for i, (name, sym) in enumerate(disp):
 
 # ============ 持股 ============
 st.markdown("<div class='sec'>我的持股</div>", unsafe_allow_html=True)
-tw_val = tw_today = 0.0
-tw_rows = []
-for name, sym, lots in TW_HOLDINGS:
-    price, prev = quotes.get(sym, (None, None))
-    if price is None:
-        tw_rows.append((name, sym, lots, None, None)); continue
-    v = lots * 1000 * price
-    t = lots * 1000 * (price - (prev or price))
-    tw_val += v; tw_today += t
-    tw_rows.append((name, sym, lots, v, t))
 
-us_val = us_today = 0.0
-us_rows = []
-for name, sym, sh in US_HOLDINGS:
-    price, prev = quotes.get(sym, (None, None))
-    if price is None:
-        us_rows.append((name, sym, sh, None, None)); continue
-    v = sh * price
-    t = sh * (price - (prev or price))
-    us_val += v; us_today += t
-    us_rows.append((name, sym, sh, v, t))
+def build_rows(holdings, is_tw):
+    rows, tv, tt = [], 0.0, 0.0
+    for name, sym, qty in holdings:
+        price, prev = quotes.get(sym, (None, None))
+        if price is None:
+            rows.append((name, sym, qty, None, None, None, None)); continue
+        mult = 1000 if is_tw else 1
+        dpx = price - (prev or price)
+        dpct = (dpx / prev * 100) if prev else 0.0
+        v = qty * mult * price
+        t = qty * mult * dpx
+        tv += v; tt += t
+        rows.append((name, sym, qty, price, dpx, dpct, t))
+    return rows, tv, tt
+
+tw_rows, tw_val, tw_today = build_rows(TW_HOLDINGS, True)
+us_rows, us_val, us_today = build_rows(US_HOLDINGS, False)
 
 total = tw_val + us_val * fx
 total_today = tw_today + us_today * fx
@@ -193,18 +201,29 @@ c1.metric(f"台股 ({len(TW_HOLDINGS)})", f"NT${fmt(tw_val)}",
 c2.metric("美股 (USD)", f"${fmt(us_val)}",
           f"{us_today:+,.0f} / {us_today/(us_val-us_today)*100:+.2f}%" if us_val-us_today else None)
 
-rows_html = "<div class='card'><div class='mut'>台股</div>"
-for name, sym, lots, v, t in tw_rows:
-    c = "up" if (t or 0) >= 0 else "dn"
-    tstr = f"<span class='{c}'>{t:+,.0f}</span>" if t is not None else "<span class='mut'>—</span>"
-    rows_html += f"<div class='hrow'><span>{name} <span class='mut'>{sym[:-3]} · {lots}張</span></span>{tstr}</div>"
-rows_html += "<div class='mut' style='margin-top:6px'>美股</div>"
-for name, sym, sh, v, t in us_rows:
-    c = "up" if (t or 0) >= 0 else "dn"
-    tstr = f"<span class='{c}'>{t:+,.0f}$</span>" if t is not None else "<span class='mut'>—</span>"
-    rows_html += f"<div class='hrow'><span>{name} <span class='mut'>{sh}股</span></span>{tstr}</div>"
-rows_html += "</div>"
-st.markdown(rows_html, unsafe_allow_html=True)
+def render_rows(rows, is_tw, head):
+    unit = "張" if is_tw else "股"
+    cur = "" if is_tw else "$"
+    html = f"<div class='mut' style='margin-top:6px'>{head}</div>"
+    for name, sym, qty, price, dpx, dpct, t in rows:
+        code = sym[:-3] if is_tw else sym
+        if price is None:
+            html += (f"<div class='hrow'><span>{name} <span class='mut'>{code} · {qty}{unit}</span></span>"
+                     f"<span class='r mut'>—</span></div>")
+            continue
+        c = "up" if dpx >= 0 else "dn"
+        pls = f"{cur}{t:+,.0f}"
+        html += (
+            f"<div class='hrow'><span>{name} <span class='mut'>{code} · {qty}{unit}</span></span>"
+            f"<span class='r'>"
+            f"<span class='px'>{price:,.2f}</span> "
+            f"<span class='{c}'>{dpx:+.2f} / {dpct:+.2f}%</span>"
+            f"<div class='pl mut'>當日 <span class='{c}'>{pls}</span></div>"
+            f"</span></div>")
+    return html
+
+st.markdown("<div class='card'>" + render_rows(tw_rows, True, "台股")
+            + render_rows(us_rows, False, "美股") + "</div>", unsafe_allow_html=True)
 
 # ============ 情緒 / 領先 ============
 st.markdown("<div class='sec'>情緒 / 領先指標</div>", unsafe_allow_html=True)
@@ -237,7 +256,7 @@ if y10 and y2:
     months = (now.date().year - last_inv.year) * 12 + (now.date().month - last_inv.month)
     tag = "倒掛" if spread < 0 else "未倒掛"
     st.markdown(
-        f"<div class='card'><div class='mut'>殖利率曲線 10Y–2Y（{ydate}）</div>"
+        f"<div class='card'><div class='mut'>殖利率曲線 10Y-2Y（{ydate}）</div>"
         f"<div class='big'>{spread:+.2f}% <span class='mut' style='font-size:14px'>{tag}</span></div>"
         f"<div class='mut'>10Y {y10:.2f}% · 2Y {y2:.2f}%　|　最後倒掛 2024/9，距今約 {months} 個月</div></div>",
         unsafe_allow_html=True)
@@ -245,23 +264,26 @@ if y10 and y2:
 # ============ 經濟日曆 ============
 st.markdown("<div class='sec'>經濟日曆（台北時間）</div>", unsafe_allow_html=True)
 EVENTS = [
-    ("2026-06-10 20:30", "🇺🇸 美國 CPI", "★★★", "預期 +3.2% / 前值 +3.4%"),
-    ("2026-06-11 20:30", "🇺🇸 PPI、初領失業金", "★★", ""),
-    ("2026-06-16 20:30", "🇺🇸 零售銷售", "★★", ""),
-    ("2026-06-18 02:00", "🇺🇸 FOMC 利率決議+記者會", "★★★", "6/16–17 會議"),
-    ("2026-06-18 16:00", "🇹🇼 台灣央行理監事會", "★★★", "季度"),
-    ("2026-07-10 16:00", "🇹🇼 台股 6月營收截止", "★★", ""),
+    ("2026-06-10 20:30", "us", "美國 CPI", "高", "預期 +3.2% / 前值 +3.4%"),
+    ("2026-06-11 20:30", "us", "PPI、初領失業金", "中", ""),
+    ("2026-06-16 20:30", "us", "零售銷售", "中", ""),
+    ("2026-06-18 02:00", "us", "FOMC 利率決議+記者會", "高", "6/16-17 會議"),
+    ("2026-06-18 16:00", "tw", "台灣央行理監事會", "高", "季度"),
+    ("2026-07-10 16:00", "tw", "台股 6月營收截止", "中", ""),
 ]
 nowstr = now.strftime("%Y-%m-%d %H:%M")
 upcoming = [e for e in EVENTS if e[0] >= nowstr][:6]
 cal = "<div class='card'>"
-for when, name, imp, note in (upcoming or EVENTS[:4]):
-    cal += (f"<div class='hrow'><span><b>{when[5:]}</b> {name}</span>"
+for when, flag, name, imp, note in (upcoming or EVENTS[:4]):
+    fcls = "fus" if flag == "us" else "ftw"
+    flab = "美" if flag == "us" else "台"
+    cal += (f"<div class='hrow'><span><span class='flag {fcls}'>{flab}</span>"
+            f"<b>{when[5:]}</b> {name}</span>"
             f"<span class='mut'>{imp}{(' · ' + note) if note else ''}</span></div>")
 cal += "</div>"
 st.markdown(cal, unsafe_allow_html=True)
 
 st.caption("資料：Yahoo Finance（延遲約15分）· FRED · CNN · TAIFEX。僅供參考，非投資建議。")
-if st.button("🔄 重新整理"):
+if st.button("重新整理"):
     st.cache_data.clear()
     st.rerun()
