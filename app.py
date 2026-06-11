@@ -27,9 +27,9 @@ INDICES = [("加權", "^TWII"), ("費半", "^SOX"), ("S&P 500", "^GSPC"),
 def _scell(r, j):
     return "" if (j is None or j >= len(r) or pd.isna(r[j])) else str(r[j]).strip()
 
-def _scol(h, key):
-    for j, c in enumerate(h):
-        if key in str(c):
+def _find(cells, key, start=0):
+    for j in range(start, len(cells)):
+        if key in str(cells[j]):
             return j
     return None
 
@@ -38,49 +38,64 @@ def _parse_tables(df):
             for i in range(len(df))]
     tw, us = [], []
     hi = next((i for i, r in enumerate(rows) if any("代號" in c for c in r)), None)
-    if hi is not None:
-        h = rows[hi]; ni, ci, li = _scol(h, "名稱"), _scol(h, "代號"), _scol(h, "張數")
-        for r in rows[hi + 1:]:
-            code = _scell(r, ci)
-            if re.fullmatch(r"\d{1,3}", code):
-                code = code.zfill(4)
-            if not re.fullmatch(r"\d{3,6}", code):
+    if hi is None:
+        return tw, us
+    h = rows[hi]
+    tw_name, tw_code = _find(h, "名稱"), _find(h, "代號")
+    tw_lot = _find(h, "張數", (tw_code or 0) + 1)
+    us_name = _find(h, "名稱", (tw_lot or 0) + 1)   # 同列第二組=左右並排
+    if us_name is not None:
+        us_lot, us_hi = _find(h, "張數", us_name + 1), hi
+    else:                                            # 否則=上下堆疊
+        us_hi = next((i for i, r in enumerate(rows)
+                      if any("張數" in c for c in r) and not any("代號" in c for c in r)), None)
+        if us_hi is not None:
+            us_name = _find(rows[us_hi], "名稱")
+            us_lot = _find(rows[us_hi], "張數")
+            if us_name is None:
+                us_name = 0
+    # 台股
+    for r in rows[hi + 1:]:
+        name, code = _scell(r, tw_name), _scell(r, tw_code)
+        if not name:
+            break
+        if re.fullmatch(r"\d{1,3}", code):
+            code = code.zfill(4)
+        if not re.fullmatch(r"\d{3,6}", code):
+            continue
+        try:
+            tw.append((name, code + ".TW", float(_scell(r, tw_lot))))
+        except Exception:
+            pass
+    # 美股
+    if us_hi is not None and us_name is not None and us_lot is not None:
+        for r in rows[us_hi + 1:]:
+            tkr = _scell(r, us_name)
+            if not tkr:
                 break
-            try:
-                tw.append((_scell(r, ni), code + ".TW", float(_scell(r, li))))
-            except Exception:
-                break
-    hi = next((i for i, r in enumerate(rows)
-               if any("張數" in c for c in r) and not any("代號" in c for c in r)), None)
-    if hi is not None:
-        h = rows[hi]; ni, li = _scol(h, "名稱"), _scol(h, "張數")
-        if ni is None:
-            ni = 0
-        for r in rows[hi + 1:]:
-            tkr = _scell(r, ni)
             if not re.fullmatch(r"[A-Za-z.]{1,6}", tkr):
-                break
+                continue
             try:
-                us.append((tkr.upper(), tkr.upper(), float(_scell(r, li))))
+                us.append((tkr.upper(), tkr.upper(), float(_scell(r, us_lot))))
             except Exception:
-                break
+                pass
     return tw, us
 
 @st.cache_data(ttl=600, show_spinner=False)
 def holdings_from_sheet():
     urls = [
-        f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv",
         f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv",
+        f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv",
     ]
     diag = []
     for u in urls:
         try:
             r = requests.get(u, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-            head = r.text[:140].replace("\n", " ")
-            diag.append(f"[{u.split('/')[-1][:18]}] status={r.status_code} head={head!r}")
+            r.encoding = "utf-8"
+            diag.append(f"[{u.split('/')[-1][:14]}] {r.status_code} {r.text[:110]!r}")
             df = pd.read_csv(io.StringIO(r.text), header=None, dtype=str)
             tw, us = _parse_tables(df)
-            diag.append(f"  -> 解析 台股{len(tw)} 美股{len(us)}")
+            diag.append(f"  台股{len(tw)} 美股{len(us)}")
             if tw and us:
                 return tw, us, ""
         except Exception as e:
