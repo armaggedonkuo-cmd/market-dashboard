@@ -24,72 +24,77 @@ INDICES = [("加權", "^TWII"), ("費半", "^SOX"), ("S&P 500", "^GSPC"),
            ("Nasdaq", "^IXIC"), ("道瓊", "^DJI")]
 
 # ============ 從試算表讀持股 ============
+def _scell(r, j):
+    return "" if (j is None or j >= len(r) or pd.isna(r[j])) else str(r[j]).strip()
+
+def _scol(h, key):
+    for j, c in enumerate(h):
+        if key in str(c):
+            return j
+    return None
+
+def _parse_tables(df):
+    rows = [[("" if pd.isna(x) else str(x)).strip() for x in df.iloc[i].tolist()]
+            for i in range(len(df))]
+    tw, us = [], []
+    hi = next((i for i, r in enumerate(rows) if any("代號" in c for c in r)), None)
+    if hi is not None:
+        h = rows[hi]; ni, ci, li = _scol(h, "名稱"), _scol(h, "代號"), _scol(h, "張數")
+        for r in rows[hi + 1:]:
+            code = _scell(r, ci)
+            if re.fullmatch(r"\d{1,3}", code):
+                code = code.zfill(4)
+            if not re.fullmatch(r"\d{3,6}", code):
+                break
+            try:
+                tw.append((_scell(r, ni), code + ".TW", float(_scell(r, li))))
+            except Exception:
+                break
+    hi = next((i for i, r in enumerate(rows)
+               if any("張數" in c for c in r) and not any("代號" in c for c in r)), None)
+    if hi is not None:
+        h = rows[hi]; ni, li = _scol(h, "名稱"), _scol(h, "張數")
+        if ni is None:
+            ni = 0
+        for r in rows[hi + 1:]:
+            tkr = _scell(r, ni)
+            if not re.fullmatch(r"[A-Za-z.]{1,6}", tkr):
+                break
+            try:
+                us.append((tkr.upper(), tkr.upper(), float(_scell(r, li))))
+            except Exception:
+                break
+    return tw, us
+
 @st.cache_data(ttl=600, show_spinner=False)
 def holdings_from_sheet():
-    base = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv"
+    urls = [
+        f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv",
+        f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv",
+    ]
+    diag = []
+    for u in urls:
+        try:
+            r = requests.get(u, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+            head = r.text[:140].replace("\n", " ")
+            diag.append(f"[{u.split('/')[-1][:18]}] status={r.status_code} head={head!r}")
+            df = pd.read_csv(io.StringIO(r.text), header=None, dtype=str)
+            tw, us = _parse_tables(df)
+            diag.append(f"  -> 解析 台股{len(tw)} 美股{len(us)}")
+            if tw and us:
+                return tw, us, ""
+        except Exception as e:
+            diag.append(f"  err={type(e).__name__}: {e}")
+    raise ValueError(" || ".join(diag))
 
-    def read(u):
-        return pd.read_csv(io.StringIO(requests.get(u, timeout=15).text), header=None, dtype=str)
-
-    def cell(r, j):
-        return "" if (j is None or j >= len(r) or pd.isna(r[j])) else str(r[j]).strip()
-
-    def colidx(h, key):
-        for j, c in enumerate(h):
-            if key in str(c):
-                return j
-        return None
-
-    def parse_tables(df):
-        rows = [[("" if pd.isna(x) else str(x)).strip() for x in df.iloc[i].tolist()]
-                for i in range(len(df))]
-        tw, us = [], []
-        hi = next((i for i, r in enumerate(rows) if any("股票代號" in c for c in r)), None)
-        if hi is not None:
-            h = rows[hi]; ni, ci, li = colidx(h, "股票名稱"), colidx(h, "股票代號"), colidx(h, "持有張數")
-            for r in rows[hi + 1:]:
-                code = cell(r, ci)
-                if re.fullmatch(r"\d{1,3}", code):
-                    code = code.zfill(4)
-                if not re.fullmatch(r"\d{3,6}", code):
-                    break
-                try:
-                    tw.append((cell(r, ni), code + ".TW", float(cell(r, li))))
-                except Exception:
-                    break
-        hi = next((i for i, r in enumerate(rows)
-                   if any("持有張數" in c for c in r) and not any("股票代號" in c for c in r)), None)
-        if hi is not None:
-            h = rows[hi]; ni, li = colidx(h, "股票名稱"), colidx(h, "持有張數")
-            for r in rows[hi + 1:]:
-                tkr = cell(r, ni)
-                if not re.fullmatch(r"[A-Z.]{1,6}", tkr):
-                    break
-                try:
-                    us.append((tkr, tkr, float(cell(r, li))))
-                except Exception:
-                    break
-        return tw, us
-
-    try:
-        tw, us = parse_tables(read(base))
-        if tw and us:
-            return tw, us
-    except Exception:
-        pass
-    tw = parse_tables(read(base + "&sheet=台股"))[0]
-    us = parse_tables(read(base + "&sheet=美股"))[1]
-    if not tw or not us:
-        raise ValueError("empty")
-    return tw, us
 def load_holdings():
     if USE_SHEET:
         try:
-            tw, us = holdings_from_sheet()
-            return tw, us, "試算表"
-        except Exception:
-            pass
-    return TW_FALLBACK, US_FALLBACK, "內建清單"
+            tw, us, _ = holdings_from_sheet()
+            return tw, us, "試算表", ""
+        except Exception as e:
+            return TW_FALLBACK, US_FALLBACK, "內建清單", str(e)
+    return TW_FALLBACK, US_FALLBACK, "內建清單", "USE_SHEET=False"
 
 # ============ 報價 ============
 @st.cache_data(ttl=600, show_spinner=False)
@@ -214,7 +219,7 @@ def fmt(n, d=0): return f"{n:,.{d}f}" if n is not None else "—"
 def pct(n): return f"{n:+.2f}%" if n is not None else "—"
 
 # ============ 抓資料 ============
-TW_HOLDINGS, US_HOLDINGS, HSRC = load_holdings()
+TW_HOLDINGS, US_HOLDINGS, HSRC, HDBG = load_holdings()
 all_syms = [s for _, s, _ in TW_HOLDINGS] + [s for _, s, _ in US_HOLDINGS] + [s for _, s in INDICES] + ["^VIX"]
 quotes = get_quotes(all_syms)
 fx = get_fx_usdtwd() or 31.5
@@ -256,6 +261,9 @@ for i, (name, sym) in enumerate(INDICES):
 # ============ 持股 ============
 st.markdown(f"<div class='sec'>我的持股　<span class='mut' style='font-weight:400'>來源：{HSRC}</span></div>",
             unsafe_allow_html=True)
+if HSRC == "內建清單" and HDBG:
+    with st.expander("持股讀取除錯（點開看原因）"):
+        st.code(HDBG)
 
 def build_rows(holdings, is_tw):
     rows, tv, tt = [], 0.0, 0.0
