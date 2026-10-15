@@ -152,8 +152,47 @@ def get_yield_curve():
         return None, None, None
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def get_fear_greed():
-    """回傳 F&G 與 美股 put/call（CNN 取自 CBOE 5日 put/call）"""
+def get_credit_spreads():
+    """ICE BofA OAS（FRED）：HY=BAMLH0A0HYM2、IG=BAMLC0A0CM，單位 %。
+    回傳最新值、約 1 週 / 1 月前的值與資料日期。"""
+    try:
+        start = (dt.date.today() - dt.timedelta(days=120)).isoformat()
+        url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id=BAMLH0A0HYM2,BAMLC0A0CM&cosd={start}"
+        df = pd.read_csv(io.StringIO(requests.get(url, timeout=15).text))
+        dcol = df.columns[0]
+        df[dcol] = pd.to_datetime(df[dcol])
+        for c in ("BAMLH0A0HYM2", "BAMLC0A0CM"):
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df = df.dropna(subset=["BAMLH0A0HYM2"]).sort_values(dcol)
+        last = df.iloc[-1]; ld = last[dcol]
+
+        def ago(days, col):
+            s = df[df[dcol] <= ld - pd.Timedelta(days=days)][col].dropna()
+            return float(s.iloc[-1]) if len(s) else None
+
+        ig = float(last["BAMLC0A0CM"]) if pd.notna(last["BAMLC0A0CM"]) else None
+        return {"hy": float(last["BAMLH0A0HYM2"]), "hy_wk": ago(7, "BAMLH0A0HYM2"),
+                "hy_mo": ago(30, "BAMLH0A0HYM2"), "ig": ig,
+                "ig_mo": ago(30, "BAMLC0A0CM"), "date": ld.strftime("%Y-%m-%d")}
+    except Exception:
+        return None
+
+def hy_level(v):
+    """HY OAS 水準判讀（經驗門檻，非精確界線）"""
+    if v < 3.5:
+        return ("偏低（風險補償薄）", "#8a7d2a")
+    if v < 5.0:
+        return ("正常", "#15883f")
+    if v < 7.0:
+        return ("升高", "#d6342b")
+    return ("信用壓力", "#d6342b")
+
+def bp(now_v, then_v):
+    return (now_v - then_v) * 100 if (now_v is not None and then_v is not None) else None
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_us_putcall():
+    """美股 put/call（CNN 資料端點，取自 CBOE 5日 put/call）"""
     try:
         url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
         headers = {
@@ -165,17 +204,8 @@ def get_fear_greed():
             "Referer": "https://edition.cnn.com/markets/fear-and-greed",
         }
         r = requests.get(url, headers=headers, timeout=15); r.raise_for_status()
-        j = r.json(); d = j["fear_and_greed"]
-        us_pc = None
-        try:
-            pcd = j.get("put_call_options", {})
-            yv = float(pcd["data"][-1]["y"])
-            if 0.2 <= yv <= 2.5:
-                us_pc = yv
-        except Exception:
-            pass
-        return {"score": round(d["score"]), "rating": d["rating"], "close": round(d["previous_close"]),
-                "wk": round(d["previous_1_week"]), "mo": round(d["previous_1_month"]), "us_pc": us_pc}
+        yv = float(r.json()["put_call_options"]["data"][-1]["y"])
+        return yv if 0.2 <= yv <= 2.5 else None
     except Exception:
         return None
 
@@ -239,7 +269,8 @@ all_syms = [s for _, s, _ in TW_HOLDINGS] + [s for _, s, _ in US_HOLDINGS] + [s 
 quotes = get_quotes(all_syms)
 fx = get_fx_usdtwd() or 31.5
 y10, y2, ydate = get_yield_curve()
-fg = get_fear_greed()
+cs = get_credit_spreads()
+us_pc = get_us_putcall()
 pc_oi, pc_vol, pc_date = get_taifex_pc()
 
 # ============ 樣式 ============
@@ -327,24 +358,46 @@ st.markdown("<div class='card'>" + render_rows(tw_rows, True, "台股")
 
 # ============ 情緒 / 領先 ============
 st.markdown("<div class='sec'>情緒 / 領先指標</div>", unsafe_allow_html=True)
+vixp = quotes.get("^VIX", (None, None))[0]
 g1, g2 = st.columns(2)
 with g1:
-    if fg:
-        rmap = {"extreme fear": "極度恐懼", "fear": "恐懼", "neutral": "中性",
-                "greed": "貪婪", "extreme greed": "極度貪婪"}
-        col = "#d6342b" if fg["score"] < 45 else ("#8a7d2a" if fg["score"] <= 55 else "#15883f")
-        st.markdown(f"<div class='card'><div class='mut'>CNN Fear &amp; Greed</div>"
-                    f"<div class='big' style='color:{col}'>{fg['score']}</div>"
-                    f"<div style='color:{col};font-weight:700'>{rmap.get(fg['rating'], fg['rating'])}</div>"
-                    f"<div class='mut'>前收 {fg['close']} · 一週 {fg['wk']} · 一月 {fg['mo']}</div></div>",
+    if cs:
+        lab, col = hy_level(cs["hy"])
+        wk, mo = bp(cs["hy"], cs["hy_wk"]), bp(cs["hy"], cs["hy_mo"])
+        def chg(v):   # 利差擴大=偏空=紅
+            if v is None:
+                return "—"
+            c = "mut" if abs(v) < 1 else ("dn" if v > 0 else "up")
+            return f"<span class='{c}'>{v:+.0f}bp</span>"
+        ig_txt = f" · IG {cs['ig']:.2f}%" if cs["ig"] is not None else ""
+        st.markdown(f"<div class='card'><div class='mut'>HY 信用利差（OAS）</div>"
+                    f"<div class='big' style='color:{col}'>{cs['hy']:.2f}%</div>"
+                    f"<div style='color:{col};font-weight:700'>{lab}</div>"
+                    f"<div class='mut'>1週 {chg(wk)} · 1月 {chg(mo)}{ig_txt}</div>"
+                    f"<div class='mut'>{cs['date']}</div></div>",
                     unsafe_allow_html=True)
     else:
-        st.markdown("<div class='card mut'>Fear &amp; Greed 讀取失敗</div>", unsafe_allow_html=True)
+        st.markdown("<div class='card mut'>信用利差讀取失敗</div>", unsafe_allow_html=True)
 with g2:
-    vixp = quotes.get("^VIX", (None, None))[0]
     vtag = "平穩" if (vixp and vixp < 20) else ("中性" if (vixp and vixp < 28) else "升高")
     st.markdown(f"<div class='card'><div class='mut'>VIX 波動率</div><div class='big'>{fmt(vixp,2)}</div>"
                 f"<div class='mut'>{vtag}</div></div>", unsafe_allow_html=True)
+
+# 利差 × VIX 綜合判讀（以 HY 一個月變化 ±50bp 為門檻）
+if cs and vixp:
+    mo = bp(cs["hy"], cs["hy_mo"])
+    widening = mo is not None and mo >= 50
+    vix_hi = vixp >= 20
+    if widening and not vix_hi:
+        msg, c = "背離：債市利差擴大、股市仍平靜 — 需留意", "dn"
+    elif widening and vix_hi:
+        msg, c = "股債同步承壓：壓力已擴散至信用市場", "dn"
+    elif vix_hi:
+        msg, c = "股市波動升高、信用市場平穩：較可能是股市本身的短期衝擊", "mut"
+    else:
+        msg, c = "股債皆平穩", "up"
+    st.markdown(f"<div class='card'><div class='mut'>利差 × VIX 判讀</div>"
+                f"<div class='{c}' style='font-size:15px'>{msg}</div></div>", unsafe_allow_html=True)
 
 p1, p2 = st.columns(2)
 with p1:
@@ -357,16 +410,15 @@ with p1:
     else:
         st.markdown("<div class='card mut'>台指期 Put/Call 讀取失敗</div>", unsafe_allow_html=True)
 with p2:
-    us_pc = fg.get("us_pc") if fg else None
     if us_pc is not None:
         lab, c = pc_sentiment(us_pc, "us")
         st.markdown(f"<div class='card'><div class='mut'>美股 Put/Call <span class='tag {c}'>{lab}</span></div>"
                     f"<div class='big'>{us_pc:.2f}</div>"
-                    f"<div class='mut'>CBOE 5日（CNN）</div></div>", unsafe_allow_html=True)
+                    f"<div class='mut'>CBOE 5日（CNN 資料）</div></div>", unsafe_allow_html=True)
     else:
         st.markdown("<div class='card mut'>美股 Put/Call 讀取失敗</div>", unsafe_allow_html=True)
 
-st.caption("Put/Call 判讀門檻 — 美股(CBOE)：≥1.05 偏空避險、≤0.70 偏多樂觀、之間中性；"
+st.caption("HY 利差門檻：<3.5% 偏低、3.5–5% 正常、5–7% 升高、≥7% 信用壓力（經驗值）。Put/Call 判讀門檻 — 美股(CBOE)：≥1.05 偏空避險、≤0.70 偏多樂觀、之間中性；"
            "台指期(未平倉比)：≥1.30 偏空、≤1.00 偏多、之間中性。極端值常為反向訊號。")
 
 if y10 and y2:
@@ -390,6 +442,6 @@ for when, flag, name, imp, note in gen_calendar(now):
 cal += "</div>"
 st.markdown(cal, unsafe_allow_html=True)
 
-st.caption("資料：Yahoo Finance（延遲約15分）· FRED · CNN · TAIFEX。CPI/PPI 日期為約略，以官方為準。非投資建議。")
+st.caption("資料：Yahoo Finance（延遲約15分）· FRED（ICE BofA OAS，落後約1個交易日）· CNN（美股 Put/Call）· TAIFEX。CPI/PPI 日期為約略，以官方為準。非投資建議。")
 if st.button("重新整理"):
     st.cache_data.clear(); st.rerun()
